@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+@theme {
+  --color-uitm-purple: #3b065a;
+}
+
+/* Custom layout smoothing adjustments */
+@layer base {
+  html, body {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}@import "tailwindcss";
+
+@theme {
+  --color-uitm-purple: #3b065a;
+}
+
+/* Custom layout smoothing adjustments */
+@layer base {
+  html, body {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
