@@ -83,7 +83,7 @@ function App() {
   const [userRole, setUserRole] = useState(null);
   const [accessToken, setAccessToken] = useState(null);
 
-  // Registration Form States
+  // Form states revised to track raw File objects instead of Base64 strings
   const [showRegisterForm, setShowRegisterForm] = useState(false);
   const [isRegistering, setIsRegistering] = useState(false);
   const [studentForm, setStudentForm] = useState({ name: '', idNumber: '', email: '' });
@@ -146,6 +146,70 @@ function App() {
 
   const closeModal = () => {
     setDialogState( prev => ({ ...prev, isOpen: false }));
+  };
+
+  // HIGHLY SPEED-OPTIMIZED: Compresses raw files via canvas down to lightweight JPEGs before uploading
+  const uploadImageToStorage = async (file, folder = 'events') => {
+    try {
+      // 1. Perform client-side image compression workflow
+      const compressedBlob = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onerror = (e) => reject(e);
+        reader.onload = (event) => {
+          const img = new Image();
+          img.src = event.target.result;
+          img.onerror = (e) => reject(e);
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            
+            // Constrain width to 800px maximum to balance quality and file weight
+            const MAX_WIDTH = 800;
+            let width = img.width;
+            let height = img.height;
+
+            if (width > MAX_WIDTH) {
+              height = Math.round((height * MAX_WIDTH) / width);
+              width = MAX_WIDTH;
+            }
+
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, width, height);
+            
+            // Export compressed binary representation at 70% quality factor
+            canvas.toBlob((blob) => {
+              if (blob) resolve(blob);
+              else reject(new Error("Canvas compression failed to generate Blob structure."));
+            }, 'image/jpeg', 0.7);
+          };
+        };
+      });
+
+      // 2. Transmit lightweight compressed blob payload over network pipe
+      const fileExt = 'jpg';
+      const fileName = `${Date.now()}_${Math.random().toString(36).substring(2, 7)}.${fileExt}`;
+      const filePath = `${folder}/${fileName}`;
+
+      const { data, error } = await supabase.storage
+        .from('event-images')
+        .upload(filePath, compressedBlob, {
+          contentType: 'image/jpeg',
+          upsert: false
+        });
+
+      if (error) throw error;
+
+      const { data: publicUrlData } = supabase.storage
+        .from('event-images')
+        .getPublicUrl(filePath);
+
+      return publicUrlData.publicUrl;
+    } catch (err) {
+      console.error("Storage upload exception caught & handled:", err.message);
+      return null;
+    }
   };
 
   const loginWithGoogle = useGoogleLogin({
@@ -296,26 +360,36 @@ function App() {
   const saveUpdatedEvent = async ( e ) => {
     e.preventDefault();
     try {
+      let finalImageUrl = editEventData.image;
+
+      // Compresses updated file dynamically if a new raw file object is supplied
+      if (editEventData.image && typeof editEventData.image !== 'string') {
+        const uploadedUrl = await uploadImageToStorage(editEventData.image, 'events');
+        if (uploadedUrl) finalImageUrl = uploadedUrl;
+      }
+
+      const updatedPayload = { ...editEventData, image: finalImageUrl };
+
       const { error } = await supabase
         .from('events')
         .update({
-          title: editEventData.title,
-          organizer: editEventData.organizer,
-          location: editEventData.location,
-          date: editEventData.date,
-          startTime: editEventData.startTime,
-          endTime: editEventData.endTime,
-          category: editEventData.category,
-          content: editEventData.content,
-          image: editEventData.image
+          title: updatedPayload.title,
+          organizer: updatedPayload.organizer,
+          location: updatedPayload.location,
+          date: updatedPayload.date,
+          startTime: updatedPayload.startTime,
+          endTime: updatedPayload.endTime,
+          category: updatedPayload.category,
+          content: updatedPayload.content,
+          image: updatedPayload.image
         })
         .eq('id', editingEventId);
 
       if (error) throw error;
-      setEvents( prev => prev.map( ev => ev.id === editingEventId ? editEventData : ev));
+      setEvents( prev => prev.map( ev => ev.id === editingEventId ? updatedPayload : ev));
       setEditingEventId(null);
       triggerModal('success', 'Records Updated', 'Event changes permanently synchronized with backend cloud cluster.');
-      pushNotification('Event Updated', `"${editEventData.title}" modifications saved securely.`);
+      pushNotification('Event Updated', `"${updatedPayload.title}" modifications saved securely.`);
     } catch (err) {
       triggerModal('info', 'Update Error', err.message);
     }
@@ -330,35 +404,46 @@ function App() {
   const saveUpdatedAnn = async ( e ) => {
     e.preventDefault();
     try {
+      let finalImageUrl = editAnnData.image;
+
+      // Compresses updated file dynamically if a new raw file object is supplied
+      if (editAnnData.image && typeof editAnnData.image !== 'string') {
+        const uploadedUrl = await uploadImageToStorage(editAnnData.image, 'announcements');
+        if (uploadedUrl) finalImageUrl = uploadedUrl;
+      }
+
+      const updatedPayload = { ...editAnnData, image: finalImageUrl };
+
       const { error } = await supabase
         .from('announcements')
         .update({
-          title: editAnnData.title,
-          category: editAnnData.category,
-          content: editAnnData.content,
-          date: editAnnData.date,
-          image: editAnnData.image
+          title: updatedPayload.title,
+          category: updatedPayload.category,
+          content: updatedPayload.content,
+          date: updatedPayload.date,
+          image: updatedPayload.image
         })
         .eq('id', editingAnnId);
 
       if (error) throw error;
-      setAnnouncements( prev => prev.map( an => an.id === editingAnnId ? editAnnData : an));
+      setAnnouncements( prev => prev.map( an => an.id === editingAnnId ? updatedPayload : an));
       setEditingAnnId(null);
       triggerModal('success', 'Notices Updated', 'Announcement adjustments permanently stored inside cloud table.');
-      pushNotification('Notice Updated', `"${editAnnData.title}" text refreshed.`);
+      pushNotification('Notice Updated', `"${updatedPayload.title}" text refreshed.`);
     } catch (err) {
       triggerModal('info', 'Update Error', err.message);
     }
   };
 
-  const processImageFile = ( file, callback ) => {
-    const reader = new FileReader();
-    reader.onloadend = () => callback(reader.result);
-    if (file) reader.readAsDataURL(file);
-  };
-
   const handleEventFormSubmit = async ( e ) => {
     e.preventDefault();
+    triggerModal('info', 'Compressing & Syncing', 'Executing canvas optimizations and uploading fast image structures...');
+
+    let imageUrl = null;
+    if (eventForm.image) {
+      imageUrl = await uploadImageToStorage(eventForm.image, 'events');
+    }
+
     const pendingPayload = {
       title: eventForm.title,
       organizer: eventForm.organizer,
@@ -368,7 +453,7 @@ function App() {
       endTime: eventForm.endTime,
       category: eventForm.category,
       content: eventForm.content,
-      image: eventForm.image
+      image: imageUrl
     };
 
     try {
@@ -383,7 +468,7 @@ function App() {
       }
       setEventForm({ title: '', organizer: '', location: '', date: '', startTime: '', endTime: '', category: 'Event', content: '', image: null });
       setCurrentView('home');
-      triggerModal('success', 'Submission Successful!', 'Your proposal has been securely logged into the remote database review table queue.');
+      triggerModal('success', 'Submission Successful!', 'Your optimized proposal has been securely logged into the remote database review table queue.');
       pushNotification('Proposal Forwarded', `"${pendingPayload.title}" uploaded to admin queue successfully.`);
     } catch (err) {
       triggerModal('info', 'Submission Error', err.message);
@@ -455,13 +540,20 @@ function App() {
 
   const handleAnnSubmit = async ( e ) => {
     e.preventDefault();
+    triggerModal('info', 'Compressing & Broadcasting', 'Optimizing notice graphic arrays before live publication...');
+    
+    let imageUrl = null;
+    if (annForm.image) {
+      imageUrl = await uploadImageToStorage(annForm.image, 'announcements');
+    }
+
     const displayDate = annForm.publishedOn || new Date().toISOString().split('T')[0];
     const annPayload = {
       title: annForm.title,
       category: annForm.category || 'General',
       content: annForm.content,
       date: displayDate,
-      image: annForm.image
+      image: imageUrl
     };
 
     try {
@@ -475,7 +567,7 @@ function App() {
         setAnnouncements( prev => [data[0], ...prev]);
       }
       setAnnForm({ title: '', category: 'General', publishedOn: '', content: '', image: null });
-      triggerModal('success', 'Notice Broadcasted!', 'Your announcement has been safely appended inside the Supabase cloud table layer.');
+      triggerModal('success', 'Notice Broadcasted!', 'Your compressed announcement has been safely appended inside the Supabase cloud table layer.');
       pushNotification('New Announcement', `Notice: "${annPayload.title}" posted.`);
     } catch (err) {
       triggerModal('info', 'Database Error', err.message);
@@ -602,7 +694,7 @@ function App() {
               </div>
               <div>
                 <label className="block font-bold text-gray-700 mb-1">COVER BANNER IMAGE</label>
-                <input type="file" accept="image/*" className="w-full p-2 border border-dashed rounded-xl" onChange={ e => processImageFile(e.target.files[0], base64 => setEventForm({ ...eventForm, image: base64 }))} />
+                <input type="file" accept="image/*" className="w-full p-2 border border-dashed rounded-xl" onChange={ e => setEventForm({ ...eventForm, image: e.target.files[0] })} />
               </div>
               <div>
                 <label className="block font-bold text-gray-700 mb-1">PROPOSAL SYNOPSIS & CONTENT</label>
@@ -619,7 +711,6 @@ function App() {
         {/* VIEW: MAIN HOME / CATEGORIES GRID DASHBOARD */}
         {(currentView === 'home' || currentView === 'admin_dashboard') && (
           <div className="space-y-6">
-            {/* Category selection header pills */}
             <div className="flex flex-wrap items-center gap-1.5 border-b pb-4 border-gray-100">
               <span className="text-[11px] uppercase font-black text-purple-950 mr-2 tracking-wider w-full sm:w-auto mb-1 sm:mb-0">Classification filter:</span>
               <div className="flex flex-wrap gap-1.5 w-full sm:w-auto">
@@ -631,7 +722,6 @@ function App() {
               </div>
             </div>
 
-            {/* Split view handling logic blocks for User vs Admin view modes */}
             {userRole === 'admin' && currentView === 'admin_dashboard' && (
               <div className="space-y-6">
                 <div className="bg-purple-50 rounded-3xl p-3 sm:p-4 flex flex-col sm:flex-row flex-wrap gap-2 border border-purple-100 shadow-xs">
@@ -643,7 +733,6 @@ function App() {
                   <button onClick={() => setAdminSubView('broadcast_man')} className={`px-4 py-2 rounded-xl text-left sm:text-center text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${adminSubView === 'broadcast_man' ? 'bg-purple-950 text-white' : 'text-purple-950 hover:bg-purple-100'}`}>📢 Broadcast Notice Board Writer</button>
                 </div>
 
-                {/* ADMIN SUB: ANALYTICS */}
                 {adminSubView === 'analytics' && (
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 animate-fadeIn">
                     <div className="bg-white border p-5 rounded-3xl shadow-xs text-center space-y-1">
@@ -661,7 +750,6 @@ function App() {
                   </div>
                 )}
 
-                {/* ADMIN SUB: PROPOSALS QUEUE */}
                 {adminSubView === 'proposals_queue' && (
                   <div className="space-y-3 animate-fadeIn">
                     <h3 className="text-xs font-black uppercase text-purple-950 tracking-wider">Review Pipeline Records</h3>
@@ -696,7 +784,6 @@ function App() {
                   </div>
                 )}
 
-                {/* ADMIN SUB: BROADCAST SYSTEM NOTICE BOARD WRITER */}
                 {adminSubView === 'broadcast_man' && (
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                     <div className="lg:col-span-1 bg-white border rounded-3xl p-4 sm:p-5 shadow-sm">
@@ -727,6 +814,10 @@ function App() {
                             <label className="block font-bold text-gray-700 mb-1">NOTICE SYNOPSIS BODY</label>
                             <textarea required rows="4" className="w-full p-2 border rounded-xl bg-white" value={editAnnData.content} onChange={ e => setEditAnnData({ ...editAnnData, content: e.target.value })} />
                           </div>
+                          <div>
+                            <label className="block font-bold text-gray-700 mb-1">REPLACE IMAGE (OPTIONAL)</label>
+                            <input type="file" accept="image/*" className="w-full p-1.5 border border-dashed rounded-xl" onChange={ e => setEditAnnData({ ...editAnnData, image: e.target.files[0] })} />
+                          </div>
                           <button type="submit" className="w-full py-2 bg-purple-950 text-white font-black rounded-xl hover:bg-black transition-all cursor-pointer shadow-md">Commit Record Alterations</button>
                         </form>
                       ) : (
@@ -753,7 +844,7 @@ function App() {
                           </div>
                           <div>
                             <label className="block font-bold text-gray-700 mb-1">BANNER ATTACHMENT (OPTIONAL)</label>
-                            <input type="file" accept="image/*" className="w-full p-1.5 border border-dashed rounded-xl" onChange={ e => processImageFile(e.target.files[0], base64 => setAnnForm({ ...annForm, image: base64 }))} />
+                            <input type="file" accept="image/*" className="w-full p-1.5 border border-dashed rounded-xl" onChange={ e => setAnnForm({ ...annForm, image: e.target.files[0] })} />
                           </div>
                           <div>
                             <label className="block font-bold text-gray-700 mb-1">NOTICE DETAILS CONTENT</label>
@@ -790,7 +881,6 @@ function App() {
               </div>
             )}
 
-            {/* Sub View Feed Splitting blocks */}
             {(currentView === 'home' || currentView === 'announcements' || currentView === 'categories' || currentView === 'admin_dashboard') && (
               <div className="space-y-4">
                 <h2 className="text-sm font-black uppercase text-purple-950 tracking-wider flex items-center gap-2 border-b pb-1.5 border-gray-100 break-words w-full">
@@ -816,7 +906,6 @@ function App() {
                           </div>
                         )}
                         
-                        {/* INLINE ADMIN SHORTCUT ON THE MAIN BOARD CARDS */}
                         {userRole === 'admin' && (
                           <div className="flex justify-end gap-2 pt-2 border-t border-gray-50 mt-1 w-full" onClick={(e) => e.stopPropagation()}>
                             <button onClick={(e) => { setAdminSubView('broadcast_man'); startEditingAnn(ann, e); }} className="text-[11px] font-bold text-blue-600 hover:underline">✏️ Edit</button>
@@ -830,7 +919,6 @@ function App() {
               </div>
             )}
 
-            {/* LIVE EVENT FEED STREAM BLOCKS */}
             {(currentView === 'home' || currentView === 'events' || currentView === 'admin_dashboard') && (
               <div className="space-y-4 pt-4">
                 <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center border-b pb-1.5 border-gray-100 gap-2">
@@ -894,6 +982,10 @@ function App() {
                         <label className="block font-bold text-gray-700 mb-0.5">SYNOPSIS DETAILS TEXT</label>
                         <textarea rows="3" className="w-full p-2 border rounded-xl bg-white" value={editEventData.content} onChange={ e => setEditEventData({ ...editEventData, content: e.target.value })} />
                       </div>
+                      <div>
+                        <label className="block font-bold text-gray-700 mb-0.5">REPLACE BANNER IMAGE (OPTIONAL)</label>
+                        <input type="file" accept="image/*" className="w-full p-1.5 border border-dashed rounded-xl text-xs" onChange={ e => setEditEventData({ ...editEventData, image: e.target.files[0] })} />
+                      </div>
                       <button type="submit" className="w-full py-2.5 bg-purple-950 text-white font-black rounded-xl hover:bg-black transition-all">Save Matrix Modifications</button>
                     </form>
                   </div>
@@ -948,7 +1040,6 @@ function App() {
         )}
       </main>
 
-      {/* EXTENDED POPUP DETAILS OVERLAY VIEW SLOTS */}
       {activeDetails && (
         <div className="fixed inset-0 z-40 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn" onClick={() => { if(!showRegisterForm) setActiveDetails(null); }}>
           <div className="bg-white rounded-3xl w-full max-w-xl max-h-[85vh] overflow-y-auto shadow-2xl p-5 sm:p-6 space-y-5 animate-scaleUp" onClick={(e) => e.stopPropagation()}>
@@ -986,7 +1077,6 @@ function App() {
               </div>
             )}
 
-            {/* SEAT RESERVATION WORKSPACE INLINE POPUP DRAWER */}
             {activeDetails.type === 'event' && userRole === 'user' && (
               <div className="pt-2 border-t border-gray-100 w-full">
                 {!showRegisterForm ? (
@@ -1041,7 +1131,6 @@ function App() {
         </div>
       )}
 
-      {/* FIXED NOTIFICATION LOG PANEL MODAL LEFT DRAWER */}
       {isNotifOpen && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex justify-end animate-fadeIn" onClick={() => setIsNotifOpen(false)}>
           <div className="bg-white w-full max-w-sm h-full shadow-2xl p-5 flex flex-col justify-between animate-slideLeft" onClick={(e) => e.stopPropagation()}>
@@ -1084,7 +1173,6 @@ function App() {
         </div>
       )}
 
-      {/* CORE ALERTS OVERLAY DESIGN WINDOW CONTAINER */}
       <PremiumDialogModal
         isOpen={dialogState.isOpen}
         type={dialogState.type}
