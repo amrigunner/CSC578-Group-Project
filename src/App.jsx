@@ -1,6 +1,6 @@
 import { supabase } from './supabaseClient';
-import { useState, useEffect, useRef } from 'react';
-import { useGoogleLogin } from '@react-oauth/google';
+import { useState, useEffect } from 'react';
+import { useGoogleLogin, googleLogout } from '@react-oauth/google';
 import uitmLogo from './assets/UiTM-Logo-tumb.png';
 
 // =============================================================
@@ -69,7 +69,32 @@ function PremiumDialogModal({ isOpen, type, title, message, onConfirm, onCancel 
 }
 
 function App() {
-  const [currentView, setCurrentView] = useState('home');
+  // Synchronously pull from localStorage on initial render to prevent layout flashes
+  const [accessToken, setAccessToken] = useState(() => {
+    return localStorage.getItem('uitm_access_token') || null;
+  });
+
+  const [userRole, setUserRole] = useState(() => {
+    return localStorage.getItem('uitm_user_role') || null;
+  });
+
+  const [userProfile, setUserProfile] = useState(() => {
+    const saved = localStorage.getItem('uitm_user_profile');
+    if (!saved) return null;
+    try {
+      return JSON.parse(saved);
+    } catch (e) {
+      return null;
+    }
+  });
+
+  const [currentView, setCurrentView] = useState(() => {
+    return localStorage.getItem('uitm_current_view') || 'home';
+  });
+
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+
+  // Operational Dashboard states
   const [adminSubView, setAdminSubView] = useState('analytics');
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [isNotifOpen, setIsNotifOpen] = useState(false);
@@ -79,55 +104,106 @@ function App() {
   const [announcements, setAnnouncements] = useState([]);
   const [events, setEvents] = useState([]);
   const [pendingRequests, setPendingRequests] = useState([]);
-  const [userProfile, setUserProfile] = useState(null);
-  const [userRole, setUserRole] = useState(null);
-  const [accessToken, setAccessToken] = useState(null);
 
-  // Form states revised to track raw File objects instead of Base64 strings
+  // Forms
   const [showRegisterForm, setShowRegisterForm] = useState(false);
   const [isRegistering, setIsRegistering] = useState(false);
   const [studentForm, setStudentForm] = useState({ name: '', idNumber: '', email: '' });
   const [eventForm, setEventForm] = useState({ title: '', organizer: '', location: '', date: '', startTime: '', endTime: '', category: 'Event', content: '', image: null });
   const [annForm, setAnnForm] = useState({ title: '', category: 'General', publishedOn: '', content: '', image: null });
 
+  // Inline Edits
   const [editingEventId, setEditingEventId] = useState(null);
   const [editEventData, setEditEventData] = useState({ title: '', organizer: '', location: '', date: '', startTime: '', endTime: '', category: 'Event', content: '', image: null });
   const [editingAnnId, setEditingAnnId] = useState(null);
   const [editAnnData, setEditAnnData] = useState({ title: '', category: 'General', date: '', content: '', image: null });
 
+  // Dialogs
   const [activeDetails, setActiveDetails] = useState(null);
   const [dialogState, setDialogState] = useState({ isOpen: false, type: 'success', title: '', message: '', onConfirm: null });
 
+  // Thorough Session Restorer & Verification on Mount
   useEffect(() => {
-    const fetchCloudData = async () => {
-      try {
-        const { data: cloudEvents, error: errEvents } = await supabase
-          .from('events')
-          .select('*')
-          .order('date', { ascending: true });
-        if (errEvents) throw errEvents;
-        setEvents(cloudEvents || []);
+    const syncAndVerifySession = async () => {
+      const savedToken = localStorage.getItem('uitm_access_token');
+      const savedProfile = localStorage.getItem('uitm_user_profile');
 
-        const { data: cloudAnns, error: errAnns } = await supabase
-          .from('announcements')
-          .select('*')
-          .order('id', { ascending: false });
-        if (errAnns) throw errAnns;
-        setAnnouncements(cloudAnns || []);
-
-        const { data: cloudRequests, error: errRequests } = await supabase
-          .from('pending_requests')
-          .select('*')
-          .order('id', { ascending: false });
-        if (errRequests) throw errRequests;
-        setPendingRequests(cloudRequests || []);
-      } catch (error) {
-        console.error("Supabase initial handshake exception:", error.message);
-        pushNotification('Sync Failure', 'Could not read live records cleanly from database tables.');
+      if (savedToken && savedProfile) {
+        try {
+          // Ping Google's tokeninfo endpoint to verify if the token is still valid
+          const response = await fetch(`https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=${savedToken}`);
+          
+          if (!response.ok) {
+            // Token is expired or revoked. Wipe local session cleanly.
+            handleLogoutSilently();
+            pushNotification('Session Expired', 'Your secure session has expired. Please sign in again.');
+          } else {
+            // Token is still valid. Sync state variables to guarantee UI integrity.
+            setAccessToken(savedToken);
+            setUserProfile(JSON.parse(savedProfile));
+            setUserRole(localStorage.getItem('uitm_user_role') || 'user');
+            setCurrentView(localStorage.getItem('uitm_current_view') || 'home');
+          }
+        } catch (error) {
+          console.warn("Session token verification failed (Network issue). Keeping offline session.", error);
+        }
+      } else {
+        // If credentials are partially cleared, reset cleanly
+        handleLogoutSilently();
       }
+
+      await fetchCloudData();
+      setIsAuthLoading(false);
     };
-    fetchCloudData();
+
+    syncAndVerifySession();
   }, []);
+
+  // Wrapper function to set view and sync it to localStorage
+  const handleSetView = (viewName) => {
+    setCurrentView(viewName);
+    localStorage.setItem('uitm_current_view', viewName);
+  };
+
+  const handleLogoutSilently = () => {
+    googleLogout();
+    setUserProfile(null);
+    setUserRole(null);
+    setAccessToken(null);
+    localStorage.removeItem('uitm_user_profile');
+    localStorage.removeItem('uitm_user_role');
+    localStorage.removeItem('uitm_access_token');
+    localStorage.removeItem('uitm_current_view');
+    setCurrentView('home');
+  };
+
+  const fetchCloudData = async () => {
+    try {
+      const { data: cloudEvents, error: errEvents } = await supabase
+        .from('events')
+        .select('*')
+        .order('date', { ascending: true });
+      if (errEvents) throw errEvents;
+      setEvents(cloudEvents || []);
+
+      const { data: cloudAnns, error: errAnns } = await supabase
+        .from('announcements')
+        .select('*')
+        .order('id', { ascending: false });
+      if (errAnns) throw errAnns;
+      setAnnouncements(cloudAnns || []);
+
+      const { data: cloudRequests, error: errRequests } = await supabase
+        .from('pending_requests')
+        .select('*')
+        .order('id', { ascending: false });
+      if (errRequests) throw errRequests;
+      setPendingRequests(cloudRequests || []);
+    } catch (error) {
+      console.error("Supabase connection exception:", error.message);
+      pushNotification('Sync Failure', 'Could not sync records with database tables.');
+    }
+  };
 
   const pushNotification = ( title, description ) => {
     const newNotif = {
@@ -148,10 +224,8 @@ function App() {
     setDialogState( prev => ({ ...prev, isOpen: false }));
   };
 
-  // HIGHLY SPEED-OPTIMIZED: Compresses raw files via canvas down to lightweight JPEGs before uploading
   const uploadImageToStorage = async (file, folder = 'events') => {
     try {
-      // 1. Perform client-side image compression workflow
       const compressedBlob = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.readAsDataURL(file);
@@ -162,8 +236,6 @@ function App() {
           img.onerror = (e) => reject(e);
           img.onload = () => {
             const canvas = document.createElement('canvas');
-            
-            // Constrain width to 800px maximum to balance quality and file weight
             const MAX_WIDTH = 800;
             let width = img.width;
             let height = img.height;
@@ -178,16 +250,14 @@ function App() {
             const ctx = canvas.getContext('2d');
             ctx.drawImage(img, 0, 0, width, height);
             
-            // Export compressed binary representation at 70% quality factor
             canvas.toBlob((blob) => {
               if (blob) resolve(blob);
-              else reject(new Error("Canvas compression failed to generate Blob structure."));
+              else reject(new Error("Canvas compression failed."));
             }, 'image/jpeg', 0.7);
           };
         };
       });
 
-      // 2. Transmit lightweight compressed blob payload over network pipe
       const fileExt = 'jpg';
       const fileName = `${Date.now()}_${Math.random().toString(36).substring(2, 7)}.${fileExt}`;
       const filePath = `${folder}/${fileName}`;
@@ -207,40 +277,47 @@ function App() {
 
       return publicUrlData.publicUrl;
     } catch (err) {
-      console.error("Storage upload exception caught & handled:", err.message);
+      console.error("Storage upload exception caught:", err.message);
       return null;
     }
   };
 
   const loginWithGoogle = useGoogleLogin({
     onSuccess: async ( tokenResponse ) => {
-      setAccessToken(tokenResponse.access_token);
+      const token = tokenResponse.access_token;
+      setAccessToken(token);
+      localStorage.setItem('uitm_access_token', token);
+
       try {
         const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-          headers: { Authorization: `Bearer ${tokenResponse.access_token}` }
+          headers: { Authorization: `Bearer ${token}` }
         });
         const payload = await userInfoRes.json();
         const email = payload.email.toLowerCase();
         const name = payload.name || 'UiTM User';
 
-        setUserProfile({ name, email });
+        const profileData = { name, email };
+        setUserProfile(profileData);
+        localStorage.setItem('uitm_user_profile', JSON.stringify(profileData));
 
         if (ADMIN_EMAILS.map( e => e.toLowerCase()).includes(email)) {
           setUserRole('admin');
-          setCurrentView('admin_dashboard');
-          triggerModal('success', 'ACCESS GRANTED!', `Admin suite authorization verified successfully. Welcome back, ${name}.`);
-          pushNotification('Admin Authorized', `Administrator context initialized cleanly for ${name}.`);
+          localStorage.setItem('uitm_user_role', 'admin');
+          handleSetView('admin_dashboard');
+          triggerModal('success', 'ACCESS GRANTED!', `Admin authorized successfully. Welcome, ${name}.`);
+          pushNotification('Admin Authorized', `Administrator context initialized for ${name}.`);
         } else {
           setUserRole('user');
-          setCurrentView('home');
+          localStorage.setItem('uitm_user_role', 'user');
+          handleSetView('home');
           triggerModal('success', 'Welcome Back!', `Logged in successfully as ${name}.`);
           pushNotification('Login Success', `Successfully signed in as ${name}.`);
         }
       } catch (err) {
-        triggerModal('info', 'Auth Exception', 'Google identity framework returned verification issues.');
+        triggerModal('info', 'Auth Exception', 'Google identity verification returned issues.');
       }
     },
-    onError: () => triggerModal('info', 'OAuth Failure', 'Google secure token handshake failed.'),
+    onError: () => triggerModal('info', 'OAuth Failure', 'Google secure handshake failed.'),
     scope: 'https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile'
   });
 
@@ -269,10 +346,6 @@ function App() {
 
   const handleStudentRegistration = async ( e ) => {
     e.preventDefault();
-    if (!accessToken) {
-      triggerModal('info', 'Authentication Required', 'Please connect with your Google profile first to sync events to your Google Calendar.');
-      return;
-    }
     if (!activeDetails) return;
     setIsRegistering(true);
     try {
@@ -289,18 +362,22 @@ function App() {
 
       if (dbErr) {
         if (dbErr.code === '23505') {
-          throw new Error("You have already submitted a seat registration for this event pipeline!");
+          throw new Error("You have already submitted a seat registration for this event!");
         }
         throw dbErr;
       }
 
-      const calendarSyncSuccessful = await syncEventToGoogleCalendar(activeDetails);
+      let calendarSyncSuccessful = false;
+      if (accessToken) {
+        calendarSyncSuccessful = await syncEventToGoogleCalendar(activeDetails);
+      }
+      
       if (calendarSyncSuccessful) {
-        triggerModal('success', 'Registration Confirmed!', `Seat successfully secured for "${activeDetails.title}". Event structure has been synced to your Google Calendar context seamlessly.`);
-        pushNotification('Event Registered', `Successfully booked slot & calendar space for: ${activeDetails.title}`);
+        triggerModal('success', 'Registration Confirmed!', `Seat secured for "${activeDetails.title}". Synchronized directly to your Google Calendar.`);
+        pushNotification('Event Registered', `Booked slot & calendar space for: ${activeDetails.title}`);
       } else {
-        triggerModal('success', 'Registration Completed with Warnings', `Seat booked successfully inside database. However, Google Workspace sync was skipped or identity context expired.`);
-        pushNotification('Event Registered', `Database slot confirmed but failed Calendar API sync for: ${activeDetails.title}`);
+        triggerModal('success', 'Registration Completed', `Seat booked successfully inside database.`);
+        pushNotification('Event Registered', `Database slot confirmed for: ${activeDetails.title}`);
       }
 
       setShowRegisterForm(false);
@@ -314,39 +391,52 @@ function App() {
   };
 
   const handleLogout = () => {
-    setUserProfile(null);
-    setUserRole(null);
-    setAccessToken(null);
-    setCurrentView('home');
-    pushNotification('Logged Out', 'Your profile session has ended safely.');
+    handleLogoutSilently();
+    pushNotification('Logged Out', 'Your session has ended.');
   };
 
   const handleDeleteEvent = async ( id, e ) => {
     if (e) e.stopPropagation();
-    triggerModal('prompt', 'Confirm Deletion', 'Are you sure you want to permanently remove this event from live database records?', async () => {
+    triggerModal('prompt', 'Confirm Deletion', 'Are you sure you want to permanently remove this event from live records?', async () => {
       try {
-        const { error } = await supabase.from('events').delete().eq('id', id);
+        const { error } = await supabase
+          .from('events')
+          .delete()
+          .eq('id', id);
+        
         if (error) throw error;
-        setEvents( prev => prev.filter( e => e.id !== id));
-        triggerModal('success', 'Notice Removed', 'Event structure deleted from live database records.');
-        pushNotification('Event Removed', 'An item was removed from system database files securely.');
+        
+        setEvents( prev => prev.filter( ev => ev.id !== id));
+        if (activeDetails?.id === id) setActiveDetails(null);
+
+        triggerModal('success', 'Notice Removed', 'Event structure deleted from database records.');
+        pushNotification('Event Removed', 'An item was removed from system database files.');
       } catch (err) {
-        triggerModal('info', 'Database Error', err.message);
+        console.error(err);
+        alert("DATABASE ERROR: " + err.message);
       }
     });
   };
 
   const handleDeleteAnnouncement = async ( id, e ) => {
     if (e) e.stopPropagation();
-    triggerModal('prompt', 'Confirm Deletion', 'Are you sure you want to completely erase this notice board post from database storage?', async () => {
+    triggerModal('prompt', 'Confirm Deletion', 'Are you sure you want to erase this notice board post?', async () => {
       try {
-        const { error } = await supabase.from('announcements').delete().eq('id', id);
+        const { error } = await supabase
+          .from('announcements')
+          .delete()
+          .eq('id', id);
+
         if (error) throw error;
+
         setAnnouncements( prev => prev.filter( a => a.id !== id));
-        triggerModal('success', 'Notice Cleaned', 'The specified system notice has been completely wiped from database storage.');
-        pushNotification('Announcement Wiped', 'Notice board post deleted by administration.');
+        if (activeDetails?.id === id) setActiveDetails(null);
+
+        triggerModal('success', 'Notice Cleaned', 'The notice has been wiped.');
+        pushNotification('Announcement Wiped', 'Notice board post deleted by administrator.');
       } catch (err) {
-        triggerModal('info', 'Database Error', err.message);
+        console.error(err);
+        alert("DATABASE ERROR: " + err.message);
       }
     });
   };
@@ -359,39 +449,45 @@ function App() {
 
   const saveUpdatedEvent = async ( e ) => {
     e.preventDefault();
+    triggerModal('info', 'Processing update...', 'Syncing record updates directly with Supabase...');
     try {
       let finalImageUrl = editEventData.image;
 
-      // Compresses updated file dynamically if a new raw file object is supplied
       if (editEventData.image && typeof editEventData.image !== 'string') {
         const uploadedUrl = await uploadImageToStorage(editEventData.image, 'events');
         if (uploadedUrl) finalImageUrl = uploadedUrl;
       }
 
-      const updatedPayload = { ...editEventData, image: finalImageUrl };
+      const updatedFields = {
+        title: editEventData.title,
+        organizer: editEventData.organizer,
+        location: editEventData.location,
+        date: editEventData.date,
+        startTime: editEventData.startTime,
+        endTime: editEventData.endTime,
+        category: editEventData.category,
+        content: editEventData.content,
+        image: finalImageUrl
+      };
 
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('events')
-        .update({
-          title: updatedPayload.title,
-          organizer: updatedPayload.organizer,
-          location: updatedPayload.location,
-          date: updatedPayload.date,
-          startTime: updatedPayload.startTime,
-          endTime: updatedPayload.endTime,
-          category: updatedPayload.category,
-          content: updatedPayload.content,
-          image: updatedPayload.image
-        })
-        .eq('id', editingEventId);
+        .update(updatedFields)
+        .eq('id', editingEventId)
+        .select();
 
       if (error) throw error;
-      setEvents( prev => prev.map( ev => ev.id === editingEventId ? updatedPayload : ev));
+
+      const savedRow = (data && data[0]) ? data[0] : { ...updatedFields, id: editingEventId };
+
+      setEvents( prev => prev.map( ev => ev.id === editingEventId ? savedRow : ev));
       setEditingEventId(null);
-      triggerModal('success', 'Records Updated', 'Event changes permanently synchronized with backend cloud cluster.');
-      pushNotification('Event Updated', `"${updatedPayload.title}" modifications saved securely.`);
+      
+      triggerModal('success', 'Records Updated', 'Event changes synchronized.');
+      pushNotification('Event Updated', `"${updatedFields.title}" modifications saved.`);
     } catch (err) {
-      triggerModal('info', 'Update Error', err.message);
+      console.error(err);
+      alert("DATABASE ERROR: " + err.message);
     }
   };
 
@@ -403,41 +499,47 @@ function App() {
 
   const saveUpdatedAnn = async ( e ) => {
     e.preventDefault();
+    triggerModal('info', 'Processing update...', 'Syncing notice alterations directly with Supabase...');
     try {
       let finalImageUrl = editAnnData.image;
 
-      // Compresses updated file dynamically if a new raw file object is supplied
       if (editAnnData.image && typeof editAnnData.image !== 'string') {
         const uploadedUrl = await uploadImageToStorage(editAnnData.image, 'announcements');
         if (uploadedUrl) finalImageUrl = uploadedUrl;
       }
 
-      const updatedPayload = { ...editAnnData, image: finalImageUrl };
+      const updatedFields = {
+        title: editAnnData.title,
+        category: editAnnData.category,
+        content: editAnnData.content,
+        date: editAnnData.date,
+        image: finalImageUrl
+      };
 
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('announcements')
-        .update({
-          title: updatedPayload.title,
-          category: updatedPayload.category,
-          content: updatedPayload.content,
-          date: updatedPayload.date,
-          image: updatedPayload.image
-        })
-        .eq('id', editingAnnId);
+        .update(updatedFields)
+        .eq('id', editingAnnId)
+        .select();
 
       if (error) throw error;
-      setAnnouncements( prev => prev.map( an => an.id === editingAnnId ? updatedPayload : an));
+
+      const savedRow = (data && data[0]) ? data[0] : { ...updatedFields, id: editingAnnId };
+
+      setAnnouncements( prev => prev.map( an => an.id === editingAnnId ? savedRow : an));
       setEditingAnnId(null);
-      triggerModal('success', 'Notices Updated', 'Announcement adjustments permanently stored inside cloud table.');
-      pushNotification('Notice Updated', `"${updatedPayload.title}" text refreshed.`);
+
+      triggerModal('success', 'Notices Updated', 'Announcement adjustments stored in cloud.');
+      pushNotification('Notice Updated', `"${updatedFields.title}" text refreshed.`);
     } catch (err) {
-      triggerModal('info', 'Update Error', err.message);
+      console.error(err);
+      alert("DATABASE ERROR: " + err.message);
     }
   };
 
   const handleEventFormSubmit = async ( e ) => {
     e.preventDefault();
-    triggerModal('info', 'Compressing & Syncing', 'Executing canvas optimizations and uploading fast image structures...');
+    triggerModal('info', 'Compressing & Syncing', 'Executing canvas optimizations...');
 
     let imageUrl = null;
     if (eventForm.image) {
@@ -467,11 +569,12 @@ function App() {
         setPendingRequests( prev => [data[0], ...prev]);
       }
       setEventForm({ title: '', organizer: '', location: '', date: '', startTime: '', endTime: '', category: 'Event', content: '', image: null });
-      setCurrentView('home');
-      triggerModal('success', 'Submission Successful!', 'Your optimized proposal has been securely logged into the remote database review table queue.');
-      pushNotification('Proposal Forwarded', `"${pendingPayload.title}" uploaded to admin queue successfully.`);
+      handleSetView('home');
+      triggerModal('success', 'Submission Successful!', 'Your proposal has been logged.');
+      pushNotification('Proposal Forwarded', `"${pendingPayload.title}" uploaded to admin queue.`);
     } catch (err) {
-      triggerModal('info', 'Submission Error', err.message);
+      console.error(err);
+      alert("DATABASE ERROR: " + err.message);
     }
   };
 
@@ -506,16 +609,21 @@ function App() {
         }
         setPendingRequests( prev => prev.filter( r => r.id !== id));
 
-        const syncOk = await syncEventToGoogleCalendar(target);
+        let syncOk = false;
+        if (accessToken) {
+          syncOk = await syncEventToGoogleCalendar(target);
+        }
+
         if (syncOk) {
-          triggerModal('success', 'Approved & Synced!', 'Authorized into Supabase storage and pushed live on connected Google Calendar accounts.');
+          triggerModal('success', 'Approved & Synced!', 'Authorized into Database and pushed to your active Google Calendar.');
           pushNotification('Event Approved', `"${target.title}" committed live.`);
         } else {
-          triggerModal('success', 'Approved Cloud DB', 'Saved to remote cloud tables perfectly, Google workspace synchronization skipped.');
-          pushNotification('Event Approved', `"${target.title}" written to cloud database.`);
+          triggerModal('success', 'Approved Cloud DB', 'Saved to remote cloud tables.');
+          pushNotification('Event Approved', `"${target.title}" written to database.`);
         }
       } catch (err) {
-        triggerModal('info', 'Database Error', err.message);
+        console.error(err);
+        alert("DATABASE ERROR: " + err.message);
       }
     });
   };
@@ -525,15 +633,16 @@ function App() {
     const target = pendingRequests.find( r => r.id === id);
     const titleText = target ? `"${target.title}"` : "this request";
 
-    triggerModal('prompt', 'Reject Event?', `Are you absolutely certain you want to decline ${titleText}?`, async () => {
+    triggerModal('prompt', 'Reject Event?', `Are you certain you want to decline ${titleText}?`, async () => {
       try {
         const { error } = await supabase.from('pending_requests').delete().eq('id', id);
         if (error) throw error;
         setPendingRequests( prev => prev.filter( r => r.id !== id));
-        triggerModal('success', 'Application Declined', 'The request pipeline has been safely deleted from storage records.');
-        pushNotification('Proposal Denied', 'An event layout model request entry was declined.');
+        triggerModal('success', 'Application Declined', 'The request pipeline has been safely deleted.');
+        pushNotification('Proposal Denied', 'An event request entry was declined.');
       } catch (err) {
-        triggerModal('info', 'Database Error', err.message);
+        console.error(err);
+        alert("DATABASE ERROR: " + err.message);
       }
     });
   };
@@ -567,20 +676,21 @@ function App() {
         setAnnouncements( prev => [data[0], ...prev]);
       }
       setAnnForm({ title: '', category: 'General', publishedOn: '', content: '', image: null });
-      triggerModal('success', 'Notice Broadcasted!', 'Your compressed announcement has been safely appended inside the Supabase cloud table layer.');
+      triggerModal('success', 'Notice Broadcasted!', 'Your announcement has been safely appended.');
       pushNotification('New Announcement', `Notice: "${annPayload.title}" posted.`);
     } catch (err) {
-      triggerModal('info', 'Database Error', err.message);
+      console.error(err);
+      alert("DATABASE ERROR: " + err.message);
     }
   };
 
   const handleFooterLinkClick = ( type ) => {
     const infoMap = {
-      motto: { title: "Motto & Vision", content: "Motto: Usaha, Taqwa, Mulia.\n\nVision: To establish UiTM as a globally renowned university in science, technology, humanities, and entrepreneurship." },
-      faq: { title: "Help / FAQ", content: "Q: How do I submit campus event requests?\nA: Sign in with your student account and click the 'Submit Event' tab.\n\nQ: Does data save automatically?\nA: Yes! All creations are connected to live tables instantly." },
+      motto: { title: "Motto & Vision", content: "Motto: Usaha, Taqwa, Mulia.\n\nVision: To establish UiTM as a globally renowned university." },
+      faq: { title: "Help / FAQ", content: "Q: How do I submit campus event requests?\nA: Sign in with your student account and click the 'Submit Event' tab." },
       history: { title: "Historical Development", content: "Established in 1956 as RIDA Training Centre, evolving into ITM in 1967, and officially elevated to Universiti Teknologi MARA (UiTM) in 1999." },
-      privacy: { title: "Privacy Policy", content: "UiTM Event Portal strictly honors identity safety. Cloud data handling uses encrypted communication parameters directly." },
-      portal: { title: "UiTM Official Portal", content: "Main Domain Presence: https://www.uitm.edu.my\n\nAccess your student directories, fees, and academic records directly." },
+      privacy: { title: "Privacy Policy", content: "UiTM Event Portal strictly honors identity safety." },
+      portal: { title: "UiTM Official Portal", content: "Main Domain Presence: https://www.uitm.edu.my" },
       support: { title: "Campus Support Email", content: "Need technical assistance?\n\nReach out to campus logistics administration at: support@uitm.edu.my." }
     };
     if (infoMap[type]) {
@@ -602,6 +712,15 @@ function App() {
     ? events
     : events.filter( e => (e.category || 'Event').toLowerCase() === selectedCategory.toLowerCase());
 
+  if (isAuthLoading) {
+    return (
+      <div className="min-h-screen bg-white flex flex-col items-center justify-center font-sans text-gray-800">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-950 mb-3"></div>
+        <p className="text-xs font-black text-purple-950 uppercase tracking-widest animate-pulse">Initializing Portal Session...</p>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-white flex flex-col font-sans text-gray-800 overflow-x-hidden w-full">
       <div className="bg-purple-950 text-white text-center py-2.5 px-4 text-xs font-medium tracking-wide break-words">
@@ -610,12 +729,12 @@ function App() {
       
       <header className="bg-white border-b border-gray-100 relative pt-6 pb-4 w-full">
         <div className="max-w-7xl mx-auto px-4 flex flex-col items-center relative gap-4 sm:gap-0">
-          <div className="flex flex-col items-center text-center cursor-pointer" onClick={() => setCurrentView('home')}>
+          <div className="flex flex-col items-center text-center cursor-pointer" onClick={() => handleSetView(userRole === 'admin' ? 'admin_dashboard' : 'home')}>
             <img src={uitmLogo} alt="UiTM Official Crest" className="h-16 w-auto object-contain mb-2" />
           </div>
           
           <div className="static sm:absolute sm:right-4 sm:top-4 text-xs z-20 flex flex-wrap justify-center items-center gap-3 w-full sm:w-auto">
-            <button onClick={() => { setIsNotifOpen(true); markAllAsRead(); }} className="relative p-2 text-gray-600 hover:text-purple-950 hover:bg-gray-100 rounded-full transition-all cursor-pointer shrink-0" title="Notification Log Feed">
+            <button onClick={() => { setIsNotifOpen(true); markAllAsRead(); }} className="relative p-2 text-gray-600 hover:text-purple-950 hover:bg-gray-100 rounded-full transition-all cursor-pointer shrink-0">
               <span className="text-lg"> 🔔 </span>
               {unreadCount > 0 && (
                 <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-red-500 text-white font-black text-[9px] rounded-full flex items-center justify-center animate-pulse">
@@ -631,7 +750,7 @@ function App() {
                   <span className="text-[10px] capitalize truncate">[{userRole}] {userProfile.name.split(' ')[0]}</span>
                 </div>
                 {userRole === 'user' && (
-                  <button onClick={() => setCurrentView('submit_event')} className="bg-amber-500 hover:bg-amber-600 text-white px-2.5 py-1.5 rounded-lg font-bold transition-all cursor-pointer text-[10px] whitespace-nowrap"> Submit Event</button>
+                  <button onClick={() => handleSetView('submit_event')} className="bg-amber-500 hover:bg-amber-600 text-white px-2.5 py-1.5 rounded-lg font-bold transition-all cursor-pointer text-[10px] whitespace-nowrap"> Submit Event</button>
                 )}
                 <button onClick={handleLogout} className="bg-red-600 hover:bg-red-700 text-white px-2.5 py-1.5 rounded-lg font-bold transition-all cursor-pointer text-[10px] whitespace-nowrap">Logout</button>
               </div>
@@ -650,7 +769,7 @@ function App() {
           <div className="max-w-2xl mx-auto bg-white border rounded-3xl p-4 sm:p-6 shadow-sm">
             <div className="flex justify-between items-center border-b pb-3 mb-4">
               <h2 className="text-xs sm:text-sm font-black text-purple-950 uppercase tracking-wider truncate mr-2">Propose New Campus Event</h2>
-              <button onClick={() => setCurrentView('home')} className="text-gray-400 font-bold text-xs shrink-0">Back</button>
+              <button onClick={() => handleSetView('home')} className="text-gray-400 font-bold text-xs shrink-0">Back</button>
             </div>
             <form onSubmit={handleEventFormSubmit} className="space-y-4 text-xs">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -701,7 +820,7 @@ function App() {
                 <textarea required rows="4" placeholder="Elaborate details..." className="w-full p-2.5 border rounded-xl bg-gray-50/50" value={eventForm.content} onChange={ e => setEventForm({ ...eventForm, content: e.target.value })} />
               </div>
               <div className="flex flex-col sm:flex-row gap-2 justify-end pt-2">
-                <button type="button" onClick={() => setCurrentView('home')} className="w-full sm:w-auto px-5 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold rounded-xl cursor-pointer order-2 sm:order-1">Cancel</button>
+                <button type="button" onClick={() => handleSetView('home')} className="w-full sm:w-auto px-5 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold rounded-xl cursor-pointer order-2 sm:order-1">Cancel</button>
                 <button type="submit" className="w-full sm:w-auto px-6 py-2.5 bg-purple-950 hover:bg-black text-white font-bold rounded-xl cursor-pointer transition-all order-1 sm:order-2">Submit to Review Pipeline</button>
               </div>
             </form>
@@ -942,35 +1061,35 @@ function App() {
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <div>
                           <label className="block font-bold text-gray-700 mb-0.5">TITLE</label>
-                          <input type="text" className="w-full p-2 border rounded-xl bg-white" value={editEventData.title} onChange={ e => setEditEventData({ ...editEventData, title: e.target.value })} />
+                          <input type="text" className="w-full p-2 border rounded-xl bg-white" value={editEventData.title} onChange = { e => setEditEventData({ ...editEventData, title: e.target.value })} />
                         </div>
                         <div>
                           <label className="block font-bold text-gray-700 mb-0.5">ORGANIZER</label>
-                          <input type="text" className="w-full p-2 border rounded-xl bg-white" value={editEventData.organizer} onChange={ e => setEditEventData({ ...editEventData, organizer: e.target.value })} />
+                          <input type="text" className="w-full p-2 border rounded-xl bg-white" value={editEventData.organizer} onChange = { e => setEditEventData({ ...editEventData, organizer: e.target.value })} />
                         </div>
                       </div>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <div>
                           <label className="block font-bold text-gray-700 mb-0.5">LOCATION</label>
-                          <input type="text" className="w-full p-2 border rounded-xl bg-white" value={editEventData.location} onChange={ e => setEditEventData({ ...editEventData, location: e.target.value })} />
+                          <input type="text" className="w-full p-2 border rounded-xl bg-white" value={editEventData.location} onChange = { e => setEditEventData({ ...editEventData, location: e.target.value })} />
                         </div>
                         <div>
                           <label className="block font-bold text-gray-700 mb-0.5">DATE</label>
-                          <input type="date" className="w-full p-2 border rounded-xl bg-white text-gray-700 cursor-pointer" value={editEventData.date} onChange={ e => setEditEventData({ ...editEventData, date: e.target.value })} />
+                          <input type="date" className="w-full p-2 border rounded-xl bg-white text-gray-700 cursor-pointer" value={editEventData.date} onChange = { e => setEditEventData({ ...editEventData, date: e.target.value })} />
                         </div>
                       </div>
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                         <div>
                           <label className="block font-bold text-gray-700 mb-0.5">START TIME</label>
-                          <input type="time" className="w-full p-2 border rounded-xl bg-white" value={editEventData.startTime} onChange={ e => setEditEventData({ ...editEventData, startTime: e.target.value })} />
+                          <input type="time" className="w-full p-2 border rounded-xl bg-white" value={editEventData.startTime} onChange = { e => setEditEventData({ ...editEventData, startTime: e.target.value })} />
                         </div>
                         <div>
                           <label className="block font-bold text-gray-700 mb-0.5">END TIME</label>
-                          <input type="time" className="w-full p-2 border rounded-xl bg-white" value={editEventData.endTime} onChange={ e => setEditEventData({ ...editEventData, endTime: e.target.value })} />
+                          <input type="time" className="w-full p-2 border rounded-xl bg-white" value={editEventData.endTime} onChange = { e => setEditEventData({ ...editEventData, endTime: e.target.value })} />
                         </div>
                         <div>
                           <label className="block font-bold text-gray-700 mb-0.5">CATEGORY</label>
-                          <select className="w-full p-2 border rounded-xl bg-white" value={editEventData.category} onChange={ e => setEditEventData({ ...editEventData, category: e.target.value })}>
+                          <select className="w-full p-2 border rounded-xl bg-white" value={editEventData.category} onChange = { e => setEditEventData({ ...editEventData, category: e.target.value })}>
                             <option value="General">General</option>
                             <option value="Academic">Academic</option>
                             <option value="Event">Event</option>
@@ -980,11 +1099,11 @@ function App() {
                       </div>
                       <div>
                         <label className="block font-bold text-gray-700 mb-0.5">SYNOPSIS DETAILS TEXT</label>
-                        <textarea rows="3" className="w-full p-2 border rounded-xl bg-white" value={editEventData.content} onChange={ e => setEditEventData({ ...editEventData, content: e.target.value })} />
+                        <textarea rows="3" className="w-full p-2 border rounded-xl bg-white" value={editEventData.content} onChange = { e => setEditEventData({ ...editEventData, content: e.target.value })} />
                       </div>
                       <div>
                         <label className="block font-bold text-gray-700 mb-0.5">REPLACE BANNER IMAGE (OPTIONAL)</label>
-                        <input type="file" accept="image/*" className="w-full p-1.5 border border-dashed rounded-xl text-xs" onChange={ e => setEditEventData({ ...editEventData, image: e.target.files[0] })} />
+                        <input type="file" accept="image/*" className="w-full p-1.5 border border-dashed rounded-xl text-xs" onChange = { e => setEditEventData({ ...editEventData, image: e.target.files[0] })} />
                       </div>
                       <button type="submit" className="w-full py-2.5 bg-purple-950 text-white font-black rounded-xl hover:bg-black transition-all">Save Matrix Modifications</button>
                     </form>
@@ -1165,7 +1284,7 @@ function App() {
             </div>
 
             <div className="pt-4 border-t border-gray-100 mt-4 w-full">
-              <button onClick={() => setIsNotifOpen(false)} className="w-full py-2 bg-gray-100 text-gray-700 font-bold rounded-xl text-xs hover:bg-gray-200 transition-all cursor-pointer text-center">
+              <button onClick={() => setIsNotifOpen(false)} className="w-full py-2 bg-gray-100 text-gray-700 font-bold rounded-xl text-[10px] hover:bg-gray-200 transition-all cursor-pointer text-center">
                 Close Stream Log Overlay
               </button>
             </div>
@@ -1189,7 +1308,7 @@ function App() {
         <div className="max-w-7xl mx-auto px-4 py-8 grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="space-y-2">
             <h4 className="font-black uppercase text-amber-400">UiTM Events Manager Cluster</h4>
-            <p className="text-purple-200 text-[11px] leading-relaxed max-w-xs break-words">An enterprise real-time event pipeline solution bridging direct Supabase clusters with student Google Workspaces natively.</p>
+            <p className="text-purple-200 text-[11px] leading-relaxed max-w-xs break-words">An enterprise event portal linking your remote Supabase records and Google Workspace credentials seamlessly.</p>
           </div>
           <div className="space-y-1">
             <h4 className="font-black uppercase text-amber-400">Directory Context</h4>
@@ -1209,11 +1328,11 @@ function App() {
           </div>
         </div>
         <div className="bg-purple-900/40 text-center py-3 text-[10px] text-purple-300 border-t border-purple-900/30 px-4 break-words">
-          &copy; {new Date().getFullYear()} Universiti Teknologi MARA. Encrypted Remote Database Stream Node Handshake Active.
+          &copy; {new Date().getFullYear()} Universiti Teknologi MARA. Secure Database Handshake Active.
         </div>
       </footer>
     </div>
   );
 }
-
+ 
 export default App;
